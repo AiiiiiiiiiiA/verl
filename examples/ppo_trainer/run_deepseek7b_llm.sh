@@ -38,4 +38,11 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
     trainer.test_freq=1 \
-    trainer.total_epochs=15 $@
+    trainer.total_epochs=15 \
+    \
+    # Enable search agent functionality
+    actor_rollout_ref.rollout.agent_search_config.do_search=true \
+    actor_rollout_ref.rollout.agent_search_config.max_turns=3 \
+    actor_rollout_ref.rollout.agent_search_config.retriever.url="http://127.0.0.1:8000/retrieve" \
+    actor_rollout_ref.rollout.agent_search_config.retriever.top_k=3 \
+    actor_rollout_ref.rollout.agent_search_config.max_new_tokens_per_turn=150 $@
