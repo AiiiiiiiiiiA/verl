@@ -1,6 +1,35 @@
 import abc
 import logging
+import os
+import json
 from typing import List, Dict, Any, Optional
+
+import numpy as np
+import torch
+
+# Attempt to import faiss and sentence_transformers
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    faiss = None # Assign to None so type hints still work
+    FAISS_AVAILABLE = False
+    logging.warning(
+        "FAISS library not found. DenseRetriever will not be available. "
+        "Please install FAISS to use DenseRetriever: pip install faiss-cpu or pip install faiss-gpu"
+    )
+
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SentenceTransformer = None # Assign to None so type hints still work
+    SENTENCE_TRANSFORMERS_AVAILABLE = False # Corrected variable name
+    logging.warning(
+        "sentence-transformers library not found. DenseRetriever will not be available. "
+        "Please install sentence-transformers: pip install sentence-transformers"
+    )
+
 
 # Attempt to import rank_bm25, otherwise use a mock
 try:
@@ -20,7 +49,7 @@ except ImportError:
         """
         def __init__(self, tokenized_corpus: List[List[str]]):
             self.tokenized_corpus = tokenized_corpus
-            self.indexed_documents: List[Dict[str, Any]] = [] 
+            self.indexed_documents: List[Dict[str, Any]] = []
             self._logger = logging.getLogger(__name__ + ".MockBM25Okapi") # Class-specific logger
             if not RANK_BM25_AVAILABLE: # Log only if we are actually using the mock due to import failure
                  self._logger.warning("rank_bm25 library not found. Using a mock BM25Okapi implementation.")
@@ -257,6 +286,31 @@ if __name__ == '__main__':
     # Test DenseRetriever (placeholder)
     print("\n--- Testing DenseRetriever ---")
     dense_retriever = DenseRetriever(model_name_or_path="sentence-transformers/all-MiniLM-L6-v2")
-    dense_retriever.index_documents(sample_corpus)
-    results_dense = dense_retriever.search("modern AI", top_k=2)
-    print(f"Dense results: {results_dense}")
+    # Check if dependencies are available before trying to use DenseRetriever
+    if FAISS_AVAILABLE and SENTENCE_TRANSFORMERS_AVAILABLE: # Typo here
+        dense_retriever.index_documents(sample_corpus)
+        results_dense = dense_retriever.search("modern AI", top_k=2)
+        print(f"Dense results: {results_dense}") # This will be empty list if not implemented
+        
+        # Test saving and loading
+        temp_index_dir = "temp_dense_index"
+        if not os.path.exists(temp_index_dir):
+            os.makedirs(temp_index_dir)
+
+        print(f"\n--- Saving DenseRetriever index to {temp_index_dir} ---")
+        dense_retriever.save_index(temp_index_dir)
+
+        print(f"\n--- Loading DenseRetriever index from {temp_index_dir} ---")
+        loaded_dense_retriever = DenseRetriever(model_name_or_path="sentence-transformers/all-MiniLM-L6-v2") # Or load from config
+        loaded_dense_retriever.load_index(temp_index_dir)
+        
+        results_loaded_dense = loaded_dense_retriever.search("modern AI", top_k=2)
+        print(f"Loaded Dense results: {results_loaded_dense}")
+        
+        # Clean up temp directory
+        # import shutil
+        # shutil.rmtree(temp_index_dir)
+        print(f"(Note: Manual cleanup of '{temp_index_dir}' might be needed if not automated)")
+
+    else:
+        print("DenseRetriever could not be tested due to missing faiss or sentence-transformers library.")

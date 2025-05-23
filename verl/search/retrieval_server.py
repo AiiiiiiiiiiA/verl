@@ -9,7 +9,14 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from verl.search.retrieval import BM25Retriever, DenseRetriever, BaseRetriever
+# Import necessary components from retrieval module
+from verl.search.retrieval import (
+    BM25Retriever, 
+    DenseRetriever, 
+    BaseRetriever,
+    FAISS_AVAILABLE,          # Flag for FAISS availability
+    SENTENCE_TRANSFORMERS_AVAILABLE # Flag for Sentence Transformers availability
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -51,20 +58,21 @@ async def startup_event():
         "--retriever_type",
         type=str,
         default="bm25",
-        choices=["bm25", "dense"],
-        help="Type of retriever to use (bm25 or dense)."
+        choices=["bm25", "dense_e5_faiss"], # Updated choices
+        help="Type of retriever to use. 'bm25' expects --index_path to be a .pkl file. "
+             "'dense_e5_faiss' expects --index_path to be a directory containing FAISS index and other components."
     )
     parser.add_argument(
         "--corpus_path",
         type=str,
-        default=None, # Default to None, so we can use dummy data if not provided
-        help="Path to the corpus JSONL file (e.g., data.jsonl). Each line should be a JSON object with 'title' and 'text'."
+        default=None, 
+        help="Path to the corpus JSONL file (e.g., data.jsonl). Used for BM25 if index is not provided or fails to load. Not used by dense_e5_faiss if a pre-built index is loaded."
     )
     parser.add_argument(
         "--index_path",
         type=str,
-        default=None, # Placeholder for pre-built indexes
-        help="Optional path to a pre-built index (e.g., for DenseRetriever)."
+        default=None, 
+        help="Path to a pre-built index. For 'bm25', this is a .pkl file. For 'dense_e5_faiss', this is a directory."
     )
     
     # FastAPI startup events don't directly accept command line args in the standard way.
@@ -106,93 +114,131 @@ async def startup_event():
         retriever = BM25Retriever() # Instantiate once
         index_loaded_successfully = False
 
-        if args.index_path and os.path.exists(args.index_path):
-            logger.info(f"Attempting to load BM25 index from {args.index_path}...")
-            try:
-                with open(args.index_path, "rb") as f_in:
-                    data_loaded = pickle.load(f_in)
-                
-                loaded_bm25_object = data_loaded.get("bm25_object")
-                loaded_documents = data_loaded.get("documents")
+        if args.index_path:
+            if not os.path.exists(args.index_path):
+                logger.warning(f"BM25 index path specified ({args.index_path}) but does not exist. Will attempt corpus loading.")
+            elif not os.path.isfile(args.index_path):
+                logger.warning(f"BM25 index path ({args.index_path}) is not a file. Will attempt corpus loading.")
+            else:
+                logger.info(f"Attempting to load BM25 index from file: {args.index_path}...")
+                try:
+                    with open(args.index_path, "rb") as f_in:
+                        data_loaded = pickle.load(f_in)
+                    
+                    loaded_bm25_object = data_loaded.get("bm25_object")
+                    loaded_documents = data_loaded.get("documents")
 
-                if loaded_bm25_object and loaded_documents is not None: # documents can be an empty list
-                    retriever.bm25 = loaded_bm25_object
-                    retriever.documents = loaded_documents
-                    # Re-create tokenized_corpus. The BM25Okapi object is already fitted based on a specific
-                    # tokenization. While it doesn't strictly need tokenized_corpus for get_top_n (which uses
-                    # its internal state and the query tokens), having retriever.tokenized_corpus populated
-                    # consistently with retriever.documents is good for the retriever's overall state.
-                    # The _tokenize method is on the instance, so it's available.
-                    retriever.tokenized_corpus = [retriever._tokenize(doc.get("text","")) for doc in retriever.documents]
-                    index_loaded_successfully = True
-                    logger.info(f"Successfully loaded BM25 index and {len(retriever.documents)} documents from {args.index_path}.")
-                else:
-                    logger.error(f"Index file {args.index_path} is missing 'bm25_object' or 'documents' key.")
-            except (pickle.UnpicklingError, FileNotFoundError, EOFError, AttributeError, KeyError, TypeError, ValueError) as e: # More specific exceptions
-                logger.error(f"Failed to load BM25 index from {args.index_path}: {e}")
-                # No need to reset retriever here, as it was just instantiated. Fallback will occur.
+                    if loaded_bm25_object and loaded_documents is not None:
+                        retriever.bm25 = loaded_bm25_object
+                        retriever.documents = loaded_documents
+                        retriever.tokenized_corpus = [retriever._tokenize(doc.get("text","")) for doc in retriever.documents]
+                        index_loaded_successfully = True
+                        logger.info(f"Successfully loaded BM25 index and {len(retriever.documents)} documents from {args.index_path}.")
+                    else:
+                        logger.error(f"BM25 index file {args.index_path} is missing 'bm25_object' or 'documents' key.")
+                except (pickle.UnpicklingError, FileNotFoundError, EOFError, AttributeError, KeyError, TypeError, ValueError) as e:
+                    logger.error(f"Failed to load BM25 index from {args.index_path}: {e}")
+        else:
+            logger.info("No BM25 index path provided. Will attempt corpus loading.")
         
         if not index_loaded_successfully:
-            logger.info("Falling back to corpus loading for BM25 (index not loaded, not provided, or failed to load).")
+            logger.info("Falling back to corpus loading for BM25 (index not loaded, not provided, failed to load, or was not a file).")
             documents_to_index = []
             corpus_loaded_from_file = False
-            if args.corpus_path and os.path.exists(args.corpus_path):
-                try:
-                    with open(args.corpus_path, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            documents_to_index.append(json.loads(line))
-                    if documents_to_index:
-                        logger.info(f"Loaded {len(documents_to_index)} documents from {args.corpus_path}.")
-                        corpus_loaded_from_file = True
-                    else:
-                        logger.warning(f"Corpus file {args.corpus_path} was empty.")
-                except Exception as e: # Catch any other error during corpus loading
-                    logger.error(f"Failed to load or parse corpus from {args.corpus_path}: {e}")
+            if args.corpus_path:
+                if not os.path.exists(args.corpus_path):
+                    logger.warning(f"BM25 corpus path specified ({args.corpus_path}) but does not exist. Using dummy documents.")
+                elif not os.path.isfile(args.corpus_path):
+                    logger.warning(f"BM25 corpus path ({args.corpus_path}) is not a file. Using dummy documents.")
+                else:
+                    try:
+                        with open(args.corpus_path, 'r', encoding='utf-8') as f:
+                            for line in f:
+                                documents_to_index.append(json.loads(line))
+                        if documents_to_index:
+                            logger.info(f"Loaded {len(documents_to_index)} documents from {args.corpus_path} for BM25.")
+                            corpus_loaded_from_file = True
+                        else:
+                            logger.warning(f"Corpus file {args.corpus_path} was empty.")
+                    except Exception as e: 
+                        logger.error(f"Failed to load or parse corpus from {args.corpus_path} for BM25: {e}")
+            else:
+                logger.info("No BM25 corpus path provided.")
             
-            if not corpus_loaded_from_file: # If file loading failed or path not given
+            if not corpus_loaded_from_file: 
                 logger.warning(
-                    f"Corpus path '{args.corpus_path}' not provided, not found, or failed to load/parse. "
+                    f"BM25: Corpus not loaded from file (path: '{args.corpus_path}'). "
                     f"Using dummy documents for BM25Retriever."
                 )
-                documents_to_index = dummy_docs # Fallback to dummy docs
+                documents_to_index = dummy_docs 
             
-            # Index whatever documents were decided (from corpus or dummy)
             if documents_to_index:
                 retriever.index_documents(documents_to_index) 
                 logger.info(f"BM25Retriever indexed {len(documents_to_index)} documents (from corpus or dummy).")
-            else: # Should only happen if dummy_docs was also empty, which it isn't.
-                logger.warning("BM25Retriever: No documents were available for indexing (corpus, dummy, or index).")
+            else: 
+                logger.warning("BM25Retriever: No documents were available for indexing.")
 
-    elif args.retriever_type == "dense":
-        # For DenseRetriever, index_path might be more relevant (though still placeholder)
-        retriever = DenseRetriever(corpus_or_index_path=args.index_path)
-        logger.info(f"DenseRetriever initialized (placeholder). Index path: {args.index_path}")
-        # Placeholder: Dense retriever might load an index or require explicit indexing
-        # For now, if corpus_path is given, we can call its index_documents (which is also a placeholder)
-        if args.corpus_path and os.path.exists(args.corpus_path):
-            # Similar loading logic as BM25, though DenseRetriever.index_documents is a placeholder
-            temp_docs_for_dense = []
-            try:
-                with open(args.corpus_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        temp_docs_for_dense.append(json.loads(line))
-                if temp_docs_for_dense:
-                    logger.info(f"Loaded {len(temp_docs_for_dense)} documents from {args.corpus_path} for potential dense indexing.")
-                    retriever.index_documents(temp_docs_for_dense) # Call placeholder index
-                else:
-                     logger.warning(f"Corpus file {args.corpus_path} was empty (for dense retriever).")
-            except Exception as e:
-                logger.error(f"Failed to load corpus for dense retriever from {args.corpus_path}: {e}")
-        elif not args.index_path: # If no index and no corpus
-             logger.info("DenseRetriever: No corpus path provided for on-the-fly indexing, and no index_path specified.")
+    elif args.retriever_type == "dense_e5_faiss":
+        logger.info("Initializing DenseRetriever (E5/FAISS)...")
+        if not FAISS_AVAILABLE or not SENTENCE_TRANSFORMERS_AVAILABLE:
+            logger.critical(
+                "DenseRetriever dependencies (FAISS or sentence-transformers) are not installed. "
+                "Cannot initialize 'dense_e5_faiss' retriever. Server might not function correctly."
+            )
+            retriever = None # Ensure retriever is None
+            return
 
+        if not args.index_path:
+            logger.critical(
+                f"'--index_path' is required for 'dense_e5_faiss' retriever type and must be a directory. "
+                f"Retriever not initialized."
+            )
+            retriever = None
+            return
+        
+        if not os.path.isdir(args.index_path):
+            logger.critical(
+                f"'--index_path' ({args.index_path}) for 'dense_e5_faiss' must be a directory. "
+                f"Retriever not initialized."
+            )
+            retriever = None
+            return
 
+        try:
+            # Instantiate DenseRetriever. It will try to load model specified in its __init__ default.
+            # The load_index method will then load index, docs, and potentially override model based on config in index_path.
+            temp_dense_retriever = DenseRetriever() 
+            
+            logger.info(f"Attempting to load dense index from directory: {args.index_path}...")
+            temp_dense_retriever.load_index(index_load_dir=args.index_path)
+
+            # Check if loading was successful (e.g., index is populated)
+            if temp_dense_retriever.index is not None and temp_dense_retriever.documents:
+                retriever = temp_dense_retriever # Assign to global retriever
+                logger.info(
+                    f"Successfully initialized DenseRetriever with index from {args.index_path}. "
+                    f"Model: {retriever.model_name_or_path}. Documents: {len(retriever.documents)}."
+                )
+            else:
+                logger.critical(
+                    f"Failed to load dense index components from directory {args.index_path}. "
+                    f"Index or documents might be missing or corrupted. DenseRetriever not available."
+                )
+                retriever = None # Ensure retriever is None if loading failed
+        except ImportError as e: # Should be caught by flags, but as a safeguard
+             logger.critical(f"ImportError during DenseRetriever initialization: {e}. Dependencies might be missing.")
+             retriever = None
+        except Exception as e:
+            logger.critical(f"Failed to initialize or load DenseRetriever from {args.index_path}: {e}", exc_info=True)
+            retriever = None
+            
     else:
         logger.error(f"Unknown retriever type: {args.retriever_type}. Retriever not initialized.")
-        # No retriever is initialized, endpoint will fail.
+        retriever = None # Ensure retriever is None for unknown types
 
 # --- API Endpoints ---
 @app.post("/retrieve", response_model=SearchResponse)
+                
 async def retrieve_documents(request: SearchRequest):
     global retriever
     if retriever is None:
