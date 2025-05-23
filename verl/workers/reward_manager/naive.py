@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re # Added import
 from collections import defaultdict
 
 import torch
@@ -23,11 +24,20 @@ from verl.utils.reward_score import _default_compute_score
 class NaiveRewardManager:
     """The reward manager."""
 
-    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source") -> None:
+    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source", tags_config=None) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or _default_compute_score
         self.reward_fn_key = reward_fn_key
+        self.tags_config = tags_config
+
+        if tags_config and "answer_tag_open" in tags_config and "answer_tag_close" in tags_config:
+            self.answer_tag_open = tags_config["answer_tag_open"]
+            self.answer_tag_close = tags_config["answer_tag_close"]
+        else:
+            self.answer_tag_open = "<answer>"
+            self.answer_tag_close = "</answer>"
+
 
     def __call__(self, data: DataProto, return_dict=False):
         """We will expand this function gradually based on the available datasets"""
@@ -62,6 +72,19 @@ class NaiveRewardManager:
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
+            # Extract answer from between tags if present
+            extracted_answer_str = None
+            if self.answer_tag_open and self.answer_tag_close:
+                # Ensure tags are properly escaped for regex if they contain special characters
+                # For simple string tags like "<answer>", direct use is often fine,
+                # but re.escape is safer.
+                pattern = f"{re.escape(self.answer_tag_open)}(.*?){re.escape(self.answer_tag_close)}"
+                match = re.search(pattern, response_str, re.DOTALL)
+                if match:
+                    extracted_answer_str = match.group(1).strip()
+            
+            solution_str_for_scoring = extracted_answer_str if extracted_answer_str is not None else response_str
+
             ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
 
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
@@ -70,7 +93,7 @@ class NaiveRewardManager:
 
             score = self.compute_score(
                 data_source=data_source,
-                solution_str=response_str,
+                solution_str=solution_str_for_scoring, # Use the potentially extracted answer
                 ground_truth=ground_truth,
                 extra_info=extra_info,
             )
@@ -91,13 +114,17 @@ class NaiveRewardManager:
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
                 print("[prompt]", prompt_str)
-                print("[response]", response_str)
+                print("[response]", response_str) # Original full response
+                if extracted_answer_str is not None:
+                    print("[extracted_answer]", extracted_answer_str)
+                else:
+                    print("[extracted_answer]", "N/A - Answer tags not found")
                 print("[ground_truth]", ground_truth)
                 if isinstance(score, dict):
                     for key, value in score.items():
-                        print(f"[{key}]", value)
+                        print(f"[{key}]", value) # This will print the score based on solution_str_for_scoring
                 else:
-                    print("[score]", score)
+                    print("[score]", score) # This is the score based on solution_str_for_scoring
 
         if return_dict:
             return {

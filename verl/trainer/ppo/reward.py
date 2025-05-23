@@ -91,11 +91,23 @@ def load_reward_manager(config, tokenizer, num_examine, **reward_kwargs):
         else:
             final_compute_score = _default_compute_score
 
+    # Access tags configuration for search agent
+    tags_config = None
+    try:
+        # Attempt to access the nested tags configuration
+        tags_config = config.actor_rollout_ref.rollout.agent_search_config.tags
+    except AttributeError:
+        # This handles cases where agent_search_config or its sub-keys might not exist
+        # For example, if the agent_search_config itself is optional in the main config.
+        # We can log this if necessary, but for now, tags_config will remain None.
+        pass # tags_config will be None if path doesn't exist
+
     return reward_manager_cls(
         tokenizer=tokenizer,
         num_examine=num_examine,
         compute_score=final_compute_score,
         reward_fn_key=config.data.reward_fn_key,
+        tags_config=tags_config, # Pass the tags configuration
         **reward_kwargs,
     )
 

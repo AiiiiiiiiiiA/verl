@@ -129,6 +129,22 @@ actor_rollout_ref:
       temperature: 0
       n: 1
       do_sample: False # default eager for validation
+    agent_search_config: # New section for search-augmented agent
+      max_turns: 3          # Maximum number of reasoning/searching steps the LLM can take in an episode.
+      do_search: false      # Whether to enable the search functionality during generation.
+      max_new_tokens_per_turn: 256 # Max new tokens LLM can generate in one turn (before parsing for action).
+      retriever:
+        url: "http://127.0.0.1:8000/retrieve" # The URL of the retrieval server.
+        top_k: 3            # The number of documents to retrieve from the search server.
+      tags: # Special tags used by the agent
+        think_tag_open: "<think>"
+        think_tag_close: "</think>"
+        search_tag_open: "<search>"
+        search_tag_close: "</search>"
+        answer_tag_open: "<answer>"
+        answer_tag_close: "</answer>"
+        information_tag_open: "<information>"
+        information_tag_close: "</information>"
     multi_turn:
       enable: False  # should set rollout.name to sglang_async if True
       max_turns: null  # null for no limit (default max_length // 3)

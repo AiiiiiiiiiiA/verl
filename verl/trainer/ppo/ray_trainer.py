@@ -934,6 +934,34 @@ class RayPPOTrainer:
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
+                    # --- Action Stats Aggregation ---
+                    all_action_stats_list = []
+                    if gen_batch_output.non_tensor_batch and isinstance(gen_batch_output.non_tensor_batch, list):
+                        for item_non_tensor_data in gen_batch_output.non_tensor_batch:
+                            if isinstance(item_non_tensor_data, dict) and "action_stats" in item_non_tensor_data:
+                                all_action_stats_list.append(item_non_tensor_data["action_stats"])
+                    
+                    if all_action_stats_list:
+                        aggregated_action_stats = defaultdict(float)
+                        num_sequences_with_stats = len(all_action_stats_list)
+
+                        if num_sequences_with_stats > 0: # Ensure we have stats to process
+                            for stats_dict in all_action_stats_list:
+                                if isinstance(stats_dict, dict): # Ensure it's a dict
+                                    for key, value in stats_dict.items():
+                                        if isinstance(value, (int, float)): # Only aggregate numeric values
+                                            aggregated_action_stats[key] += value
+                            
+                            for key, total_sum in aggregated_action_stats.items():
+                                metrics[f"action_stats/{key}_sum"] = total_sum
+                                # Calculate averages for specific keys
+                                if key in ["total_actions_parsed", "num_search_actions", 
+                                           "num_valid_actions", "num_answer_actions", 
+                                           "num_think_actions", "num_content_responses", 
+                                           "completed_turns", "num_malformed_tags"]: # Added num_malformed_tags
+                                    metrics[f"action_stats/{key}_avg"] = total_sum / num_sequences_with_stats
+                    # --- End Action Stats Aggregation ---
+
                     batch.batch["response_mask"] = compute_response_mask(batch)
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
